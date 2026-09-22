@@ -438,7 +438,7 @@ class NODE_OT_PBRBatchFolderConnect(bpy.types.Operator):
                 mat_name = mat.name
                 clean_mat_name = mat_name.split('.')[0]  # 去掉 .001 后缀
 
-                # 模糊匹配：忽略 T_/M_/SM_ 前缀差异，精确优先+子串回退
+                # 模糊匹配：忽略 T_/MI_/M_/SM_ 前缀差异，精确优先+子串回退
                 matched_files = []
                 match_scores = {}  # f_name -> score, 用于排序取最佳匹配
                 for f in all_files:

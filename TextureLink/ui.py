@@ -39,7 +39,7 @@ def _draw_update_banner(layout):
 
 
 class NODE_PT_PBRMainPanel(bpy.types.Panel):
-    bl_label = "TextureLink"
+    bl_label = "贴图链接"
     bl_idname = "NODE_PT_pbr_main"
     bl_space_type = 'NODE_EDITOR'
     bl_region_type = 'UI'

@@ -59,8 +59,8 @@ def is_pbr_texture_name_lower(name_lower):
 
 
 def _strip_common_prefixes(name: str) -> str:
-    """循环去掉常见的 SM_/M_/T_ 前缀，返回核心名。支持 SM_T_RockWall_D 这种多层前缀。"""
-    KNOWN_PREFIXES = ("sm_", "m_", "t_")
+    """循环去掉常见的 SM_/MI_/M_/T_ 前缀，返回核心名。支持 SM_T_RockWall_D 这种多层前缀。"""
+    KNOWN_PREFIXES = ("sm_", "mi_", "m_", "t_")
     n = name.strip()
     while True:
         lower = n.lower()
@@ -83,7 +83,7 @@ _MIN_LENGTH_RATIO = 0.5  # 子串匹配时，较短串长度需 ≥ 较长串 ×
 
 def fuzzy_match_core_name(mat_name: str, file_stem: str) -> int:
     """
-    材质名与贴图文件名主干做模糊匹配，忽略 T_/M_/SM_ 前缀差异。
+    材质名与贴图文件名主干做模糊匹配，忽略 T_/MI_/M_/SM_ 前缀差异。
     策略：精确优先 → 模糊子串回退。
     返回匹配质量分 (0 = 不匹配，100 = 精确匹配)，分数越高越可靠。
     """
@@ -979,11 +979,11 @@ def process_rename_material(mat):
             core_name = raw_clean_name[:-suffix_len]
             
             if core_name.upper().startswith("T_"):
-                final_name = "M_" + core_name[2:]
+                final_name = "MI_" + core_name[2:]
             elif core_name.upper().startswith("T"):
-                final_name = "M" + core_name[1:]
+                final_name = "MI" + core_name[1:]
             else:
-                final_name = "M_" + core_name
+                final_name = "MI_" + core_name
             
             new_material_name = final_name
             best_priority = current_priority
@@ -998,10 +998,11 @@ def process_rename_material(mat):
 def process_rename_materials_from_object(obj):
     """
     根据物体名重命名其材质槽中的材质：
-    - 物体名前缀：SM_ / sm_ -> M_（去掉 SM_，加 M_）
-    - 无 SM_ 前缀：在前面加 M_
+    - 物体名前缀：SM_ / sm_ -> MI_（去掉 SM_，加 MI_）
+    - 无 SM_ 前缀：在前面加 MI_
+    - 已有 MI_ / M_ 前缀的旧名先剥掉，保证重复执行不叠加前缀
     - 单材质：直接用目标名称
-    - 多材质：按槽位顺序追加大写字母 A/B/C...：M_xxx_A/B/C...
+    - 多材质：按槽位顺序追加大写字母 A/B/C...：MI_xxx_A/B/C...
     返回值：成功重命名的材质数量
     """
     if not obj or not hasattr(obj, "material_slots"):
@@ -1019,9 +1020,15 @@ def process_rename_materials_from_object(obj):
     obj_name = obj.name
     if obj_name.lower().startswith("sm_"):
         core_name = obj_name[3:]  # 去掉 SM_
-        target_base = "M_" + core_name
     else:
-        target_base = "M_" + obj_name
+        core_name = obj_name
+    # 旧名可能带 MI_ / M_ 前缀，先剥掉，保证重复执行不叠加前缀
+    lowered_core = core_name.lower()
+    for legacy_prefix in ("mi_", "m_"):
+        if lowered_core.startswith(legacy_prefix):
+            core_name = core_name[len(legacy_prefix):]
+            break
+    target_base = "MI_" + core_name
 
     renamed = 0
     if len(non_empty_slots) == 1:
@@ -1058,10 +1065,13 @@ def process_rename_materials_from_object(obj):
 
 
 def _build_texture_base_name_from_material_name(material_name):
-    """将材质名转换为贴图基础名：M_xxx -> T_xxx；否则前置 T_。"""
+    """将材质名转换为贴图基础名：MI_xxx / M_xxx -> T_xxx；否则前置 T_。"""
     if not material_name:
         return "T_Untitled"
-    if material_name[:2].lower() == "m_":
+    lowered = material_name.lower()
+    if lowered.startswith("mi_"):
+        return "T_" + material_name[3:]
+    if lowered.startswith("m_"):
         return "T_" + material_name[2:]
     return "T_" + material_name
 
