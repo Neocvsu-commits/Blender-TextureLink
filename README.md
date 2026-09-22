@@ -1,5 +1,5 @@
 
-# TextureLink v2.5.6
+# TextureLink v2.5.7
 
 在 Blender Shader Editor 里一键搞定贴图连线、重命名、清理、压缩、批量导入。把繁琐的节点操作交给插件。
 
@@ -13,7 +13,7 @@
 
 | 项目 | 内容 |
 | :--- | :--- |
-| 插件版本 | 2.5.6 |
+| 插件版本 | 2.5.7 |
 | Blender 支持 | 3.4.0+ |
 | 入口 | Shader Editor > 侧栏（N）> PBR Tool |
 

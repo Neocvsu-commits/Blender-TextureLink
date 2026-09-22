@@ -1,7 +1,7 @@
 bl_info = {
-    "name": "TextureLink",
+    "name": "贴图链接",
     "author": "Neo",
-    "version": (2, 5, 6),
+    "version": (2, 5, 7),
     "blender": (3, 4, 0),
     "location": "Node Editor > Sidebar > PBR Tool",
     "description": "PBR贴图连接、重命名、清理、导出与压缩工具（正式版）",
@@ -48,6 +48,7 @@ classes = (
     operators.NODE_OT_PBRCheckUpdate,
     operators.NODE_OT_PBRInstallUpdate,
 
+    ui.TextureLinkPreferences,
     ui.NODE_PT_PBRMainPanel,
     ui.NODE_PT_PBRCorePanel,
     ui.NODE_PT_PBRRenamePanel,

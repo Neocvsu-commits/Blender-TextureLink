@@ -38,6 +38,34 @@ def _draw_update_banner(layout):
     row.operator("node.pbr_install_update", text="一键更新", icon="IMPORT")
 
 
+class TextureLinkPreferences(bpy.types.AddonPreferences):
+    """插件偏好设置：反馈与支持入口。"""
+
+    bl_idname = __name__.rsplit(".", 1)[0] if "." in __name__ else __name__
+
+    def draw(self, context):
+        layout = self.layout
+        feedback_box = layout.box()
+        feedback_box.label(text="反馈 & 支持", icon="HELP")
+        fb_row = feedback_box.row(align=True)
+        fb_row.operator(
+            "wm.url_open",
+            text="Bug / 功能建议",
+            icon="GHOST_ENABLED",
+        ).url = "https://github.com/Neocvsu-commits/Blender-TextureLink/issues/new"
+        fb_row.operator(
+            "wm.url_open",
+            text="匿名反馈",
+            icon="COMMUNITY",
+        ).url = "https://docs.qq.com/form/page/DTnV6S25STkxJR0Zy"
+        fb_row2 = feedback_box.row()
+        fb_row2.operator(
+            "wm.url_open",
+            text="⭐ 作者主页（了解更多工具）",
+            icon="URL",
+        ).url = "https://github.com/Neocvsu-commits"
+
+
 class NODE_PT_PBRMainPanel(bpy.types.Panel):
     bl_label = "贴图链接"
     bl_idname = "NODE_PT_pbr_main"
@@ -233,25 +261,3 @@ class NODE_PT_PBRBatchPanel(bpy.types.Panel):
         draw_action_row(layout, "node.pbr_batch_folder_connect", 'FILE_FOLDER', "scope_connect", "基于名称匹配文件夹贴图")
         draw_action_row(layout, "node.pbr_export_current_textures", 'EXPORT', "scope_rename", "导出当前修改贴图")
         draw_action_row(layout, "node.pbr_rename_textures_sync_disk", 'FILE_TICK', "scope_rename", "同步当前修改贴图至磁盘")
-
-        # ---- 反馈入口 ----
-        layout.separator()
-        feedback_box = layout.box()
-        feedback_box.label(text="反馈 & 支持", icon="HELP")
-        fb_row = feedback_box.row(align=True)
-        fb_row.operator(
-            "wm.url_open",
-            text="Bug / 功能建议",
-            icon="GHOST_ENABLED",
-        ).url = "https://github.com/Neocvsu-commits/Blender-TextureLink/issues/new"
-        fb_row.operator(
-            "wm.url_open",
-            text="匿名反馈",
-            icon="COMMUNITY",
-        ).url = "https://docs.qq.com/form/page/DTnV6S25STkxJR0Zy"
-        fb_row2 = feedback_box.row()
-        fb_row2.operator(
-            "wm.url_open",
-            text="⭐ 作者主页（了解更多工具）",
-            icon="URL",
-        ).url = "https://github.com/Neocvsu-commits"
