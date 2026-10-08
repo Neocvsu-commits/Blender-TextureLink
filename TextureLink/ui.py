@@ -3,22 +3,6 @@ import bpy
 from .properties import ue_model_property, get_addon_preferences
 
 
-def _draw_ue_mode_toggle(layout, context):
-    """
-    面板最上方：UE 模式开关（高亮显示当前材质命名前缀）。
-    开启（默认，高亮）：材质命名使用 MI_；关闭：材质命名使用 M_。
-    """
-    prefs = get_addon_preferences(context)
-    if prefs is None:
-        return
-
-    row = layout.row(align=True)
-    row.scale_y = 1.5
-    mode_text = "UE 模式  材质 MI_" if prefs.is_ue_model else "非 UE 模式  材质 M_"
-    row.prop(prefs, "is_ue_model", text=mode_text, toggle=True)
-    layout.separator(factor=0.4)
-
-
 def _draw_update_banner(layout):
     """面板顶部：版本状态 + 刷新按钮。"""
     try:
@@ -101,7 +85,6 @@ class NODE_PT_PBRMainPanel(bpy.types.Panel):
     bl_category = 'PBR Tool'
 
     def draw(self, context):
-        _draw_ue_mode_toggle(self.layout, context)
         _draw_update_banner(self.layout)
 
 
@@ -142,6 +125,19 @@ class NODE_PT_PBRRenamePanel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'PBR Tool'
     bl_parent_id = "NODE_PT_pbr_main"
+    bl_options = {'HEADER_LAYOUT_EXPAND'}
+
+    def draw_header(self, context):
+        """标题行右侧：UE 模式开关，决定材质命名前缀（MI_ / M_）。"""
+        prefs = get_addon_preferences(context)
+        if prefs is None:
+            return
+        row = self.layout.row(align=True)
+        row.alignment = 'RIGHT'
+        row.prop(
+            prefs, "is_ue_model", toggle=True,
+            text="UE  MI_" if prefs.is_ue_model else "非UE  M_",
+        )
 
     def draw(self, context):
         layout = self.layout
