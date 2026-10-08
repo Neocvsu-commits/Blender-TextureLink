@@ -1,6 +1,37 @@
 import bpy
 from bpy.props import StringProperty, EnumProperty, BoolProperty, FloatProperty, IntProperty
 
+
+def ue_model_property():
+    """UE 模式开关：决定材质命名使用 MI_ 还是 M_ 前缀。"""
+    return BoolProperty(
+        name="UE模式",
+        default=True,
+        description="开启（高亮）：UE 模型材质使用 MI_ 前缀；关闭：非 UE 模型材质使用 M_ 前缀",
+    )
+
+
+def get_addon_preferences(context=None):
+    """取回本插件偏好设置；插件未启用或上下文不可用时返回 None。"""
+    ctx = context or bpy.context
+    try:
+        addon = ctx.preferences.addons.get(__package__)
+    except Exception:
+        return None
+    return addon.preferences if addon else None
+
+
+def is_ue_mode(context=None):
+    """当前是否为 UE 模式；读取失败时按默认开启处理。"""
+    prefs = get_addon_preferences(context)
+    return bool(getattr(prefs, "is_ue_model", True))
+
+
+def get_material_name_prefix(context=None):
+    """材质命名前缀：UE 模式 MI_，非 UE 模式 M_。"""
+    return "MI_" if is_ue_mode(context) else "M_"
+
+
 class PBRV2ToolProperties(bpy.types.PropertyGroup):
     scope_connect: EnumProperty(
         name="连接排版范围",

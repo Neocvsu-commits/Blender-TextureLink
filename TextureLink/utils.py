@@ -936,9 +936,26 @@ def process_clean_unused_nodes(mat):
         
     return len(to_remove) > 0
 
-def process_rename_material(mat):
+def normalize_material_prefix(material_prefix):
+    """
+    规范化材质命名前缀：UE 模式为 MI_，非 UE 模式为 M_。
+    传入空值或非法值时回退到 MI_，保证旧调用点行为不变。
+    """
+    prefix = (material_prefix or "MI_").strip()
+    if prefix.lower() not in ("mi_", "m_"):
+        prefix = "MI_"
+    return prefix.upper()
+
+
+def process_rename_material(mat, material_prefix="MI_"):
+    """
+    根据优先级最高的已连接贴图重命名材质球。
+    material_prefix：材质名前缀，UE 模式 MI_，非 UE 模式 M_。
+    """
     if not mat or not mat.use_nodes: return False
     nodes = mat.node_tree.nodes
+    prefix = normalize_material_prefix(material_prefix)
+    prefix_stem = prefix[:-1]  # MI_ -> MI，M_ -> M（兼容 T_Name 这类被误当 T_ 前缀的名字）
     
     image_nodes = [n for n in nodes if n.type == 'TEX_IMAGE']
     if not image_nodes: return False
@@ -979,11 +996,11 @@ def process_rename_material(mat):
             core_name = raw_clean_name[:-suffix_len]
             
             if core_name.upper().startswith("T_"):
-                final_name = "MI_" + core_name[2:]
+                final_name = prefix + core_name[2:]
             elif core_name.upper().startswith("T"):
-                final_name = "MI" + core_name[1:]
+                final_name = prefix_stem + core_name[1:]
             else:
-                final_name = "MI_" + core_name
+                final_name = prefix + core_name
             
             new_material_name = final_name
             best_priority = current_priority
@@ -995,14 +1012,15 @@ def process_rename_material(mat):
     return False
 
 
-def process_rename_materials_from_object(obj):
+def process_rename_materials_from_object(obj, material_prefix="MI_"):
     """
     根据物体名重命名其材质槽中的材质：
-    - 物体名前缀：SM_ / sm_ -> MI_（去掉 SM_，加 MI_）
-    - 无 SM_ 前缀：在前面加 MI_
+    - 物体名前缀：SM_ / sm_ -> 材质前缀（去掉 SM_，加前缀）
+    - 无 SM_ 前缀：在前面加材质前缀
     - 已有 MI_ / M_ 前缀的旧名先剥掉，保证重复执行不叠加前缀
     - 单材质：直接用目标名称
     - 多材质：按槽位顺序追加大写字母 A/B/C...：MI_xxx_A/B/C...
+    material_prefix：材质名前缀，UE 模式 MI_，非 UE 模式 M_。
     返回值：成功重命名的材质数量
     """
     if not obj or not hasattr(obj, "material_slots"):
@@ -1028,7 +1046,7 @@ def process_rename_materials_from_object(obj):
         if lowered_core.startswith(legacy_prefix):
             core_name = core_name[len(legacy_prefix):]
             break
-    target_base = "MI_" + core_name
+    target_base = normalize_material_prefix(material_prefix) + core_name
 
     renamed = 0
     if len(non_empty_slots) == 1:
