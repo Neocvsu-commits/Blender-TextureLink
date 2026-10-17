@@ -15,6 +15,9 @@ SUFFIX_MAP = {
     'ALPHA': ['_alpha', '_opacity', '_a']
 }
 
+# UE 材质命名规范：材质统一 M_ 前缀，贴图统一 T_ 前缀（旧 MI_ 规范已废弃）
+MATERIAL_PREFIX = "M_"
+
 def get_clean_name_for_search(image_name):
     name = image_name
     if len(name) > 4 and name[-4] == '.' and name[-3:].isdigit():
@@ -59,7 +62,7 @@ def is_pbr_texture_name_lower(name_lower):
 
 
 def _strip_common_prefixes(name: str) -> str:
-    """循环去掉常见的 SM_/MI_/M_/T_ 前缀，返回核心名。支持 SM_T_RockWall_D 这种多层前缀。"""
+    """循环去掉常见的 SM_/M_/T_ 前缀（含旧规范 MI_），返回核心名。支持 SM_T_RockWall_D 这种多层前缀。"""
     KNOWN_PREFIXES = ("sm_", "mi_", "m_", "t_")
     n = name.strip()
     while True:
@@ -83,7 +86,7 @@ _MIN_LENGTH_RATIO = 0.5  # 子串匹配时，较短串长度需 ≥ 较长串 ×
 
 def fuzzy_match_core_name(mat_name: str, file_stem: str) -> int:
     """
-    材质名与贴图文件名主干做模糊匹配，忽略 T_/MI_/M_/SM_ 前缀差异。
+    材质名与贴图文件名主干做模糊匹配，忽略 T_/M_/SM_ 前缀差异（旧规范 MI_ 同样忽略）。
     策略：精确优先 → 模糊子串回退。
     返回匹配质量分 (0 = 不匹配，100 = 精确匹配)，分数越高越可靠。
     """
@@ -936,26 +939,14 @@ def process_clean_unused_nodes(mat):
         
     return len(to_remove) > 0
 
-def normalize_material_prefix(material_prefix):
+def process_rename_material(mat):
     """
-    规范化材质命名前缀：UE 模式为 MI_，非 UE 模式为 M_。
-    传入空值或非法值时回退到 MI_，保证旧调用点行为不变。
-    """
-    prefix = (material_prefix or "MI_").strip()
-    if prefix.lower() not in ("mi_", "m_"):
-        prefix = "MI_"
-    return prefix.upper()
-
-
-def process_rename_material(mat, material_prefix="MI_"):
-    """
-    根据优先级最高的已连接贴图重命名材质球。
-    material_prefix：材质名前缀，UE 模式 MI_，非 UE 模式 M_。
+    根据优先级最高的已连接贴图重命名材质球，材质名统一 M_ 前缀。
     """
     if not mat or not mat.use_nodes: return False
     nodes = mat.node_tree.nodes
-    prefix = normalize_material_prefix(material_prefix)
-    prefix_stem = prefix[:-1]  # MI_ -> MI，M_ -> M（兼容 T_Name 这类被误当 T_ 前缀的名字）
+    prefix = MATERIAL_PREFIX
+    prefix_stem = prefix[:-1]  # M_ -> M（兼容 T_Name 这类被误当 T_ 前缀的名字）
     
     image_nodes = [n for n in nodes if n.type == 'TEX_IMAGE']
     if not image_nodes: return False
@@ -1012,15 +1003,14 @@ def process_rename_material(mat, material_prefix="MI_"):
     return False
 
 
-def process_rename_materials_from_object(obj, material_prefix="MI_"):
+def process_rename_materials_from_object(obj):
     """
-    根据物体名重命名其材质槽中的材质：
-    - 物体名前缀：SM_ / sm_ -> 材质前缀（去掉 SM_，加前缀）
-    - 无 SM_ 前缀：在前面加材质前缀
-    - 已有 MI_ / M_ 前缀的旧名先剥掉，保证重复执行不叠加前缀
+    根据物体名重命名其材质槽中的材质，材质名统一 M_ 前缀：
+    - 物体名前缀：SM_ / sm_ -> 去掉 SM_，加材质前缀
+    - 无 SM_ 前缀：直接加材质前缀
+    - 已有 M_ / 旧 MI_ 前缀的旧名先剥掉，保证重复执行不叠加前缀
     - 单材质：直接用目标名称
-    - 多材质：按槽位顺序追加大写字母 A/B/C...：MI_xxx_A/B/C...
-    material_prefix：材质名前缀，UE 模式 MI_，非 UE 模式 M_。
+    - 多材质：按槽位顺序追加大写字母 A/B/C...：M_xxx_A/B/C...
     返回值：成功重命名的材质数量
     """
     if not obj or not hasattr(obj, "material_slots"):
@@ -1040,13 +1030,13 @@ def process_rename_materials_from_object(obj, material_prefix="MI_"):
         core_name = obj_name[3:]  # 去掉 SM_
     else:
         core_name = obj_name
-    # 旧名可能带 MI_ / M_ 前缀，先剥掉，保证重复执行不叠加前缀
+    # 旧名可能带 M_ / 旧 MI_ 前缀，先剥掉，保证重复执行不叠加前缀
     lowered_core = core_name.lower()
     for legacy_prefix in ("mi_", "m_"):
         if lowered_core.startswith(legacy_prefix):
             core_name = core_name[len(legacy_prefix):]
             break
-    target_base = normalize_material_prefix(material_prefix) + core_name
+    target_base = MATERIAL_PREFIX + core_name
 
     renamed = 0
     if len(non_empty_slots) == 1:
@@ -1083,7 +1073,7 @@ def process_rename_materials_from_object(obj, material_prefix="MI_"):
 
 
 def _build_texture_base_name_from_material_name(material_name):
-    """将材质名转换为贴图基础名：MI_xxx / M_xxx -> T_xxx；否则前置 T_。"""
+    """将材质名转换为贴图基础名：M_xxx -> T_xxx（旧 MI_xxx 同样兼容）；否则前置 T_。"""
     if not material_name:
         return "T_Untitled"
     lowered = material_name.lower()

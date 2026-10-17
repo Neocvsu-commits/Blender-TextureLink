@@ -1,7 +1,5 @@
 import bpy
 
-from .properties import ue_model_property, get_addon_preferences
-
 
 def _draw_update_banner(layout):
     """面板顶部：版本状态 + 刷新按钮。"""
@@ -41,21 +39,15 @@ def _draw_update_banner(layout):
 
 
 class TextureLinkPreferences(bpy.types.AddonPreferences):
-    """插件偏好设置：UE 模式与反馈支持入口。"""
+    """插件偏好设置：命名规范说明与反馈支持入口。"""
 
     bl_idname = __name__.rsplit(".", 1)[0] if "." in __name__ else __name__
 
-    is_ue_model: ue_model_property()
-
     def draw(self, context):
         layout = self.layout
-        mode_box = layout.box()
-        mode_box.label(text="材质命名模式", icon="MATERIAL")
-        mode_box.prop(self, "is_ue_model", text="UE模式（材质 MI_）", toggle=True)
-        mode_box.label(
-            text="开启：材质命名为 MI_xxx；关闭：材质命名为 M_xxx，贴图统一 T_xxx",
-            icon="INFO",
-        )
+        naming_box = layout.box()
+        naming_box.label(text="材质命名规范", icon="MATERIAL")
+        naming_box.label(text="材质统一 M_xxx，贴图统一 T_xxx", icon="INFO")
         feedback_box = layout.box()
         feedback_box.label(text="反馈 & 支持", icon="HELP")
         fb_row = feedback_box.row(align=True)
@@ -125,19 +117,6 @@ class NODE_PT_PBRRenamePanel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = 'PBR Tool'
     bl_parent_id = "NODE_PT_pbr_main"
-    bl_options = {'HEADER_LAYOUT_EXPAND'}
-
-    def draw_header(self, context):
-        """标题行右侧：UE 模式开关，决定材质命名前缀（MI_ / M_）。"""
-        prefs = get_addon_preferences(context)
-        if prefs is None:
-            return
-        row = self.layout.row(align=True)
-        row.alignment = 'RIGHT'
-        row.prop(
-            prefs, "is_ue_model", toggle=True,
-            text="UE  MI_" if prefs.is_ue_model else "非UE  M_",
-        )
 
     def draw(self, context):
         layout = self.layout

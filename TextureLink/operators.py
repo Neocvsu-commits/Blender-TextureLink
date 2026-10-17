@@ -19,8 +19,8 @@ from .utils import (
     read_disk_image_size,
     fuzzy_match_core_name,
     write_image_memory_to_path,
+    MATERIAL_PREFIX,
 )
-from .properties import get_material_name_prefix
 
 
 def _bake_image_to_packed(img, fmt, target_ext, scene=None):
@@ -255,7 +255,6 @@ class NODE_OT_PBRRenameMaterial(bpy.types.Operator):
             
         props = context.scene.pbr_v2_props
         scope = props.scope_rename
-        material_prefix = get_material_name_prefix(context)
         mats = get_target_materials(context, scope)
         if not mats:
             self.report({'WARNING'}, "未找到可操作的材质")
@@ -267,7 +266,7 @@ class NODE_OT_PBRRenameMaterial(bpy.types.Operator):
             expected_name = None
             # 先取一下期望值，通过暂存名判断是否被 Blender 自动改了后缀
             old_name = mat.name
-            if process_rename_material(mat, material_prefix):
+            if process_rename_material(mat):
                 count += 1
                 # 检测实际名称是否与期望不符（说明有重名，被加了.001之类后缀）
                 # process_rename_material 内部已打印 print，这里收集给 report
@@ -275,7 +274,7 @@ class NODE_OT_PBRRenameMaterial(bpy.types.Operator):
                 if '.' in mat.name.split('_', 1)[-1]:
                     renamed_warning.append(mat.name)
 
-        msg = f"成功重命名了 {count} 个材质（前缀 {material_prefix}）"
+        msg = f"成功重命名了 {count} 个材质（前缀 {MATERIAL_PREFIX}）"
         if renamed_warning:
             msg += f"（注意: {len(renamed_warning)} 个材质因重名被改为含 '.001' 后缀）"
         self.report({'INFO'}, msg)
@@ -294,7 +293,6 @@ class NODE_OT_PBRRenameMaterialFromObject(bpy.types.Operator):
 
     def execute(self, context):
         scope = context.scene.pbr_v2_props.scope_rename
-        material_prefix = get_material_name_prefix(context)
 
         if scope == 'CURRENT':
             objects = [context.active_object] if context.active_object else []
@@ -312,9 +310,9 @@ class NODE_OT_PBRRenameMaterialFromObject(bpy.types.Operator):
                 continue
 
             processed_obj_count += 1
-            renamed_mat_count += process_rename_materials_from_object(obj, material_prefix)
+            renamed_mat_count += process_rename_materials_from_object(obj)
 
-        self.report({'INFO'}, f"完成：处理 {processed_obj_count} 个物体，重命名 {renamed_mat_count} 个材质（前缀 {material_prefix}）")
+        self.report({'INFO'}, f"完成：处理 {processed_obj_count} 个物体，重命名 {renamed_mat_count} 个材质（前缀 {MATERIAL_PREFIX}）")
         return {'FINISHED'}
 
 
@@ -441,7 +439,7 @@ class NODE_OT_PBRBatchFolderConnect(bpy.types.Operator):
                 mat_name = mat.name
                 clean_mat_name = mat_name.split('.')[0]  # 去掉 .001 后缀
 
-                # 模糊匹配：忽略 T_/MI_/M_/SM_ 前缀差异，精确优先+子串回退
+                # 模糊匹配：忽略 T_/M_/SM_（含旧 MI_）前缀差异，精确优先+子串回退
                 matched_files = []
                 match_scores = {}  # f_name -> score, 用于排序取最佳匹配
                 for f in all_files:
