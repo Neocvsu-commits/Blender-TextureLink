@@ -2,28 +2,45 @@ import bpy
 import os
 import re
 import tempfile
+from collections import namedtuple
 
 # --- 全局配置 ---
+# 通道字段表：值是文件名里可能出现的「字段」写法。
+# 识别时与位置、大小写、分隔符无关：RedRoot_BaseColor_2048、BaseColor_RedRoot、
+# T_Rock_bc、RedRoot_Normal_OpenGL_2048 都能认出来。
 SUFFIX_MAP = {
-    'BASE_COLOR': ['_d', '_bc', '_basecolor', '_albedo', '_diff', '_color'],
-    'ORM': ['_arm', '_orm', '_ao_r_m'], # G=Roughness, B=Metallic
+    'BASE_COLOR': ['_basecolor', '_base_color', '_albedo', '_diffuse', '_diff', '_color', '_col', '_bc', '_d'],
+    'ORM': ['_orm', '_arm', '_ao_r_m'], # R=AO, G=Roughness, B=Metallic
     'RMA': ['_rma'],                    # R=Roughness, G=Metallic
-    'NORMAL': ['_n', '_nor', '_normal', '_nrm'],
-    'ROUGHNESS': ['_r', '_roughness', '_rough', '_rgh'],
-    'METALLIC': ['_m', '_metallic', '_metal', '_met'],
+    'NORMAL': ['_normal', '_normalmap', '_nor', '_nrm', '_n'],
+    'ROUGHNESS': ['_roughness', '_rough', '_rgh', '_r'],
+    'METALLIC': ['_metallic', '_metal', '_met', '_m'],
     'AO': ['_ao', '_ambientocclusion', '_occlusion'],
     'ALPHA': ['_alpha', '_opacity', '_a']
 }
 
+# 同一位置命中多个通道时的取舍顺序（越靠前越优先）
+CHANNEL_TIE_BREAK = ('ORM', 'RMA', 'NORMAL', 'BASE_COLOR', 'AO', 'ALPHA', 'ROUGHNESS', 'METALLIC')
+
+# 单字母别名：只在「最后一个有效字段」上生效，避免 RedRoot 的 r 被当成 Roughness
+_SINGLE_LETTER_ALIASES = frozenset({'_d', '_n', '_r', '_m', '_a'})
+
+# 「自动连接」过程中需要提醒用户的事项（如 DirectX 法线），由操作符取走并显示
+CONNECT_NOTES = []
+
 # UE 材质命名规范：材质统一 M_ 前缀，贴图统一 T_ 前缀（旧 MI_ 规范已废弃）
 MATERIAL_PREFIX = "M_"
 
-def get_clean_name_for_search(image_name):
+def get_search_name(image_name):
+    """返回用于识别的贴图名：保留大小写，便于按大小写边界拆词。"""
     name = image_name
     if len(name) > 4 and name[-4] == '.' and name[-3:].isdigit():
         name = name[:-4]
-    name = os.path.splitext(name)[0]
-    return name.lower()
+    return os.path.splitext(name)[0]
+
+
+def get_clean_name_for_search(image_name):
+    return get_search_name(image_name).lower()
 
 def clean_name_for_rename(image_name):
     name = image_name
@@ -34,31 +51,203 @@ def clean_name_for_rename(image_name):
         name = base
     return name
 
+# --- 通道字段识别 ---
+# 名字先按分隔符与大小写边界拆词（RedRoot → red root，Normal_OpenGL → normal open gl），
+# 再把词拼起来找别名，因此字段落在文件名哪一段都能命中。
+
+_WORD_RE = re.compile(r'[A-Za-z0-9]+')
+_CAMEL_WORD_RE = re.compile(r'[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+')
+_NON_ALNUM_RE = re.compile(r'[^a-z0-9]')
+
+# 结尾噪音词：分辨率、取向、色彩空间、通用尾词，判断「最后一个有效字段」时跳过
+_NOISE_WORDS = frozenset({
+    'map', 'tex', 'texture', 'mask',
+    'srgb', 'linear', 'noncolor', 'raw',
+    'res', 'low', 'high', 'lowres', 'highres', 'hd', 'uhd',
+    'final', 'copy', 'new', 'test', 'preview', 'export',
+})
+_NOISE_PATTERN = re.compile(r'^(?:\d+|[1-9]k|k|v\d+)$')
+
+# 法线朝向标记：OpenGL 是 Blender 默认；DirectX 的 G 通道方向相反
+# （open / gl 分开列出，是因为 OpenGL 会被大小写边界拆成两个词）
+_DEVICE_WORDS = frozenset({'opengl', 'open', 'gl', 'gles', 'ogl', 'dx', 'd3d', 'direct3d', 'directx', 'nox'})
+_DIRECTX_WORDS = frozenset({'dx', 'd3d', 'direct3d', 'directx'})
+_OPENGL_WORDS = frozenset({'opengl'})
+
+# 别名允许停在词中间（如 normalmap 里认 normal）的最短长度；短别名必须吃满整词
+_PARTIAL_MATCH_MIN_LEN = 6
+
+ChannelMatch = namedtuple('ChannelMatch', 'channel start end alias variant')
+
+
+def _split_words(name):
+    """把文件名拆成 [(小写词, 原字符串里的起始下标)]。"""
+    words = []
+    for chunk in _WORD_RE.finditer(name):
+        text = chunk.group(0)
+        for piece in _CAMEL_WORD_RE.finditer(text):
+            words.append((piece.group(0).lower(), chunk.start() + piece.start()))
+    return words
+
+
+def _is_noise_word(word):
+    return word in _NOISE_WORDS or word in _DEVICE_WORDS or _NOISE_PATTERN.match(word) is not None
+
+
+def _last_meaningful_word_index(words):
+    """从尾部跳过分辨率、取向、通用尾词，返回最后一个有效词的下标。"""
+    idx = len(words) - 1
+    while idx >= 0:
+        word = words[idx][0]
+        if _is_noise_word(word):
+            idx -= 1
+            continue
+        # DirectX / OpenGL 这类词可能被大小写拆成两段（open + gl）
+        if idx > 0 and (words[idx - 1][0] + word) in _DEVICE_WORDS:
+            idx -= 2
+            continue
+        break
+    return idx
+
+
+def _detect_normal_variant(words):
+    """判断法线贴图的朝向标记，返回 'directx' / 'opengl' / ''。"""
+    word_list = [w for w, _ in words]
+    pairs = {word_list[i] + word_list[i + 1] for i in range(len(word_list) - 1)}
+    hits = set(word_list) | pairs
+    if hits & _DIRECTX_WORDS:
+        return 'directx'
+    if hits & _OPENGL_WORDS:
+        return 'opengl'
+    return ''
+
+
+def _strip_trailing_noise(text):
+    """去掉名称结尾的分辨率、版本、取向等字段，返回主体。"""
+    text = text.strip(" _-.")
+    while text:
+        words = _split_words(text)
+        if not words:
+            break
+        last_word, last_start = words[-1]
+        if not _is_noise_word(last_word):
+            break
+        text = text[:last_start].strip(" _-.")
+    return text
+
+
+def _match_rank(match):
+    try:
+        tie = CHANNEL_TIE_BREAK.index(match.channel)
+    except ValueError:
+        tie = len(CHANNEL_TIE_BREAK)
+    return (match.end, len(_NON_ALNUM_RE.sub('', match.alias.lower())), -tie)
+
+
+def find_channel_match(name):
+    """
+    在贴图文件名里找通道字段，返回 ChannelMatch(channel, start, end, alias, variant)，找不到返回 None。
+
+    规则：
+    - 字段可以在任意位置：`RedRoot_BaseColor_2048`、`BaseColor_RedRoot`、`T_Rock_bc` 都认；
+    - 只从词首算命中，chaos 里的 ao、method 里的 met 不会被误判；
+    - 越靠后的字段越可信（材质名带 Metal 也压不过后面的 _BaseColor）；
+    - 同一位置长别名优先（_ao_r_m 优于单独的 _r、_m）；
+    - 单字母别名（_d/_n/_r/_m/_a）只认最后一个有效字段，RedRoot 的 r 不会被当成 Roughness。
+    """
+    if not name:
+        return None
+
+    words = _split_words(name)
+    if not words:
+        return None
+
+    tokens = [w for w, _ in words]
+    squashed = ''.join(tokens)
+
+    # 拼接串里每个字符对应的原字符串下标，命中后可直接切出字段位置
+    char_origin = []
+    for token, origin in words:
+        for offset in range(len(token)):
+            char_origin.append(origin + offset)
+
+    word_starts = set()
+    word_ends = set()
+    cursor = 0
+    for token in tokens:
+        word_starts.add(cursor)
+        cursor += len(token)
+        word_ends.add(cursor)
+
+    tail_idx = _last_meaningful_word_index(words)
+    tail_end = None if tail_idx < 0 else sum(len(t) for t in tokens[:tail_idx + 1])
+
+    best = None
+    for channel, aliases in SUFFIX_MAP.items():
+        for alias in aliases:
+            needle = _NON_ALNUM_RE.sub('', alias.lower())
+            if not needle:
+                continue
+            search_from = 0
+            while True:
+                pos = squashed.find(needle, search_from)
+                if pos < 0:
+                    break
+                search_from = pos + 1
+                if pos not in word_starts:
+                    continue
+                match_end = pos + len(needle)
+                if match_end not in word_ends and len(needle) < _PARTIAL_MATCH_MIN_LEN:
+                    continue
+                if alias in _SINGLE_LETTER_ALIASES and match_end != tail_end:
+                    continue
+                candidate = ChannelMatch(
+                    channel,
+                    char_origin[pos],
+                    char_origin[match_end - 1] + 1,
+                    alias,
+                    '',
+                )
+                if best is None or _match_rank(candidate) > _match_rank(best):
+                    best = candidate
+
+    if best is not None and best.channel == 'NORMAL':
+        best = best._replace(variant=_detect_normal_variant(words))
+    return best
+
+
 def check_suffix(clean_name_lower, suffixes):
-    for s in suffixes:
-        if clean_name_lower.endswith(s):
-            return s
+    """兼容旧接口：命中的别名属于给定列表时返回该别名。"""
+    match = find_channel_match(clean_name_lower)
+    if match and match.alias in suffixes:
+        return match.alias
     return None
 
 
 def match_orm_filename_suffix(name_lower):
-    """
-    ORM 贴图文件名：标准后缀或 glTF 导入常见的 _orm_0、_orm_12（与 _AO 命名成对替换时同一套基底）。
-    """
-    s = check_suffix(name_lower, SUFFIX_MAP['ORM'])
-    if s:
-        return s
-    m = re.search(r'_orm_\d+$', name_lower)
-    if m:
-        return m.group(0)
+    """ORM/ARM 复合图（含 glTF 常见的 _orm_0）命中时返回别名。"""
+    match = find_channel_match(name_lower)
+    if match and match.channel == 'ORM':
+        return match.alias
     return None
 
 
 def is_pbr_texture_name_lower(name_lower):
-    """是否属于本工具识别的 PBR 贴图命名（含 glTF 的 _orm_N）。"""
-    if any(check_suffix(name_lower, sfx) for sfx in SUFFIX_MAP.values()):
-        return True
-    return match_orm_filename_suffix(name_lower) is not None
+    """是否属于本工具识别的 PBR 贴图命名。"""
+    return find_channel_match(name_lower) is not None
+
+
+def note_connect_warning(message):
+    """记录一条自动连接的提醒，等操作符取走显示。"""
+    if message not in CONNECT_NOTES and len(CONNECT_NOTES) < 20:
+        CONNECT_NOTES.append(message)
+
+
+def consume_connect_notes():
+    """取走并清空自动连接提醒。"""
+    notes = list(CONNECT_NOTES)
+    CONNECT_NOTES.clear()
+    return notes
 
 
 def _strip_common_prefixes(name: str) -> str:
@@ -84,30 +273,27 @@ _MIN_CORE_LEN = 3  # 核心名最短长度，防止 "a" 之类的碰瓷大量文
 _MIN_LENGTH_RATIO = 0.5  # 子串匹配时，较短串长度需 ≥ 较长串 × 此比例
 
 
-def fuzzy_match_core_name(mat_name: str, file_stem: str) -> int:
+def _file_stem_core_candidates(file_stem):
     """
-    材质名与贴图文件名主干做模糊匹配，忽略 T_/M_/SM_ 前缀差异（旧规范 MI_ 同样忽略）。
-    策略：精确优先 → 模糊子串回退。
-    返回匹配质量分 (0 = 不匹配，100 = 精确匹配)，分数越高越可靠。
+    贴图文件名的核心名候选：原始主干，以及去掉通道字段与分辨率等尾巴后的主干。
+    后者让 `M_RedRoot` 也能匹配 `RedRoot_BaseColor_2048.png`、`BaseColor_RedRoot_2048.png`。
     """
-    if not mat_name or not file_stem:
-        return 0
+    candidates = [_strip_common_prefixes(file_stem)]
+    match = find_channel_match(file_stem)
+    if match:
+        for part in (_strip_trailing_noise(file_stem[:match.start]),
+                     _strip_trailing_noise(file_stem[match.end:])):
+            if part:
+                candidates.append(_strip_common_prefixes(part))
+    return [c for c in candidates if c]
 
-    mat_core = _strip_common_prefixes(mat_name)
-    file_core = _strip_common_prefixes(file_stem)
 
-    # 空核心名 → 拒绝（如 "M_" 去掉前缀后为空）
-    if not mat_core or not file_core:
-        return 0
-
-    mat_lower = mat_core.lower()
-    file_lower = file_core.lower()
-
+def _score_core_match(mat_lower, file_lower):
+    """核心名比对打分：精确 100，子串 40-79，过短或无关 0。"""
     # 过短核心名 → 拒绝（如 "a" 会碰瓷所有含 a 的文件）
     if len(mat_lower) < _MIN_CORE_LEN or len(file_lower) < _MIN_CORE_LEN:
         return 0
 
-    # 精确匹配（忽略大小写）→ 最高分
     if mat_lower == file_lower:
         return 100
 
@@ -121,6 +307,29 @@ def fuzzy_match_core_name(mat_name: str, file_stem: str) -> int:
             return int(ratio * 80)  # 映射到 40-79 分，和精确匹配拉开差距
 
     return 0
+
+
+def fuzzy_match_core_name(mat_name: str, file_stem: str) -> int:
+    """
+    材质名与贴图文件名主干做模糊匹配，忽略 T_/M_/SM_ 前缀差异（旧规范 MI_ 同样忽略）。
+    策略：精确优先 → 模糊子串回退；文件名里的通道字段与分辨率不参与比对。
+    返回匹配质量分 (0 = 不匹配，100 = 精确匹配)，分数越高越可靠。
+    """
+    if not mat_name or not file_stem:
+        return 0
+
+    mat_core = _strip_common_prefixes(mat_name)
+    # 空核心名 → 拒绝（如 "M_" 去掉前缀后为空）
+    if not mat_core:
+        return 0
+
+    mat_lower = mat_core.lower()
+    best = 0
+    for file_core in _file_stem_core_candidates(file_stem):
+        best = max(best, _score_core_match(mat_lower, file_core.lower()))
+        if best == 100:
+            break
+    return best
 
 
 def _force_claim_name(datablocks, current, target_name):
@@ -277,9 +486,11 @@ def connect_pbr_nodes(nodes, links, principled_node, image_nodes):
         if not img_node.image:
             continue
         
-        name_lower = get_clean_name_for_search(img_node.image.name)
+        channel = find_channel_match(get_search_name(img_node.image.name))
+        if channel is None:
+            continue
 
-        if check_suffix(name_lower, SUFFIX_MAP['BASE_COLOR']):
+        if channel.channel == 'BASE_COLOR':
             try: img_node.image.colorspace_settings.name = 'sRGB'
             except: pass
             
@@ -302,7 +513,7 @@ def connect_pbr_nodes(nodes, links, principled_node, image_nodes):
             # 团队规范：_D（基础色）不再自动连接 Alpha，避免影响 GLB 导出。
             # 如需透明效果，由美术手动判定并连接。
 
-        elif match_orm_filename_suffix(name_lower):
+        elif channel.channel == 'ORM':
             try: img_node.image.colorspace_settings.name = 'Non-Color'
             except: pass
             sep_node = None
@@ -329,7 +540,7 @@ def connect_pbr_nodes(nodes, links, principled_node, image_nodes):
                 if in2:
                     links.new(sep_node.outputs[0], in2)
 
-        elif check_suffix(name_lower, SUFFIX_MAP['RMA']):
+        elif channel.channel == 'RMA':
             try: img_node.image.colorspace_settings.name = 'Non-Color'
             except: pass
             sep_node = None
@@ -348,9 +559,13 @@ def connect_pbr_nodes(nodes, links, principled_node, image_nodes):
             if 'Metallic' in principled_node.inputs:
                 links.new(sep_node.outputs[1], principled_node.inputs['Metallic'])
 
-        elif check_suffix(name_lower, SUFFIX_MAP['NORMAL']):
+        elif channel.channel == 'NORMAL':
             try: img_node.image.colorspace_settings.name = 'Non-Color'
             except: pass
+
+            # DirectX 朝向的法线在 Blender 里 G 通道方向相反，不静默改线，先提醒
+            if channel.variant == 'directx':
+                note_connect_warning(f"{img_node.image.name}: DirectX 法线，G 通道需翻转")
             
             nrm_node = None
             normal_socket = principled_node.inputs.get('Normal')
@@ -367,21 +582,21 @@ def connect_pbr_nodes(nodes, links, principled_node, image_nodes):
             if normal_socket:
                 links.new(nrm_node.outputs['Normal'], normal_socket)
 
-        elif check_suffix(name_lower, SUFFIX_MAP['ROUGHNESS']):
+        elif channel.channel == 'ROUGHNESS':
             try: img_node.image.colorspace_settings.name = 'Non-Color'
             except: pass
             target_socket = principled_node.inputs.get('Roughness')
             if target_socket:
                 links.new(img_node.outputs['Color'], target_socket)
 
-        elif check_suffix(name_lower, SUFFIX_MAP['METALLIC']):
+        elif channel.channel == 'METALLIC':
             try: img_node.image.colorspace_settings.name = 'Non-Color'
             except: pass
             target_socket = principled_node.inputs.get('Metallic')
             if target_socket:
                 links.new(img_node.outputs['Color'], target_socket)
 
-        elif check_suffix(name_lower, SUFFIX_MAP['AO']):
+        elif channel.channel == 'AO':
             try: img_node.image.colorspace_settings.name = 'Non-Color'
             except: pass
             base_color_input = principled_node.inputs.get('Base Color')
@@ -391,7 +606,7 @@ def connect_pbr_nodes(nodes, links, principled_node, image_nodes):
                 if in2:
                     links.new(img_node.outputs['Color'], in2)
 
-        elif check_suffix(name_lower, SUFFIX_MAP['ALPHA']):
+        elif channel.channel == 'ALPHA':
             try: img_node.image.colorspace_settings.name = 'Non-Color'
             except: pass
             target_socket = principled_node.inputs.get('Alpha')
@@ -801,9 +1016,8 @@ def process_connect_and_arrange(mat, context=None):
     # 为了满足“一键修正”，我们保留对 image_node 的重新连接，但 connect_pbr_nodes 内部变得聪明了
     for img_node in image_nodes:
         if not img_node.image: continue
-        name_lower = get_clean_name_for_search(img_node.image.name)
         # 仅当它是我们需要管理的 PBR 贴图时，才由我们接管其连接
-        is_pbr = is_pbr_texture_name_lower(name_lower)
+        is_pbr = is_pbr_texture_name_lower(get_search_name(img_node.image.name))
         if is_pbr:
             for out in img_node.outputs:
                 if out.is_linked:
@@ -855,22 +1069,13 @@ def process_connect_and_arrange(mat, context=None):
     # 排列贴图节点
     for img_node in image_nodes:
         if not img_node.image: continue
-        name_lower = get_clean_name_for_search(img_node.image.name)
-        
-        # 判断当前贴图属于什么类型
-        pos_set = False
+
+        # 判断当前贴图属于什么类型，按类型决定摆放高度
         img_node.location.x = base_x
-        for type_key, suffixes in SUFFIX_MAP.items():
-            if type_key == 'ORM':
-                matched = match_orm_filename_suffix(name_lower)
-            else:
-                matched = check_suffix(name_lower, suffixes)
-            if matched:
-                img_node.location.y = loc_y_map.get(type_key, principled_node.location.y)
-                pos_set = True
-                break
-                
-        if not pos_set:
+        channel = find_channel_match(get_search_name(img_node.image.name))
+        if channel is not None:
+            img_node.location.y = loc_y_map.get(channel.channel, principled_node.location.y)
+        else:
             img_node.location.y = principled_node.location.y - y_spacing * 5
             
     # --- 调用 Node Arrange 插件 (如果可用) ---
@@ -959,42 +1164,31 @@ def process_rename_material(mat):
             continue
         
         raw_clean_name = clean_name_for_rename(img_node.image.name)
-        name_lower = raw_clean_name.lower()
-        
-        matched_suffix = None
-        current_priority = 0
-        
-        s = check_suffix(name_lower, SUFFIX_MAP['BASE_COLOR'])
-        if s:
-            matched_suffix = s
-            current_priority = 2
-        
-        if not matched_suffix:
-            orm_s = match_orm_filename_suffix(name_lower)
-            if orm_s:
-                matched_suffix = orm_s
-                current_priority = 1
-            else:
-                for key in ['RMA', 'NORMAL', 'ALPHA']:
-                    s = check_suffix(name_lower, SUFFIX_MAP[key])
-                    if s:
-                        matched_suffix = s
-                        current_priority = 1
-                        break
-        
-        if matched_suffix and current_priority > best_priority:
-            suffix_len = len(matched_suffix)
-            core_name = raw_clean_name[:-suffix_len]
-            
-            if core_name.upper().startswith("T_"):
-                final_name = prefix + core_name[2:]
-            elif core_name.upper().startswith("T"):
-                final_name = prefix_stem + core_name[1:]
-            else:
-                final_name = prefix + core_name
-            
-            new_material_name = final_name
-            best_priority = current_priority
+        channel = find_channel_match(raw_clean_name)
+        if channel is None:
+            continue
+
+        # 基础色最能代表整套贴图的名字，优先用它；其余通道作兜底
+        current_priority = 2 if channel.channel == 'BASE_COLOR' else 1
+        if current_priority <= best_priority:
+            continue
+
+        # 字段之前的部分就是材质名来源；字段写在最前面时，退回取它后面的部分
+        core_name = _strip_trailing_noise(raw_clean_name[:channel.start])
+        if not core_name:
+            core_name = _strip_trailing_noise(raw_clean_name[channel.end:])
+        if not core_name:
+            continue
+
+        if core_name.upper().startswith("T_"):
+            final_name = prefix + core_name[2:]
+        elif core_name.upper().startswith("T"):
+            final_name = prefix_stem + core_name[1:]
+        else:
+            final_name = prefix + core_name
+
+        new_material_name = final_name
+        best_priority = current_priority
 
     if new_material_name and mat.name != new_material_name:
         _force_claim_name(bpy.data.materials, mat, new_material_name)

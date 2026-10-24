@@ -1,9 +1,9 @@
 
-# TextureLink v2.7.0
+# TextureLink v2.8.0
 
 在 Blender Shader Editor 里一键搞定贴图连线、重命名、清理、压缩、批量导入。把繁琐的节点操作交给插件。
 
-**v2.7.0 更新**：材质命名规范统一为 `M_` 前缀，移除「命名规则」标题行右侧的 UE 模式开关（原 `MI_` / `M_` 双模式）；已有 `MI_` 材质在执行一次重命名后自动转为 `M_`。
+**v2.8.0 更新**：贴图识别不再要求通道字段必须在文件名结尾。`RedRoot_BaseColor_2048`、`RedRoot_ARM_2048`、`RedRoot_Normal_OpenGL_2048` 这类 AI 生成命名（字段在中间、分辨率在最后）也能正确连线和命名；批量匹配文件夹贴图同样先剔掉通道字段再对齐材质名；法线标注 DirectX 时会在状态栏提示 G 通道需翻转。
 
 ## 解决的问题
 
@@ -23,7 +23,7 @@
 
 ### 🔧 贴图连接
 
-**自动连接贴图** — 识别贴图后缀，接到 Principled BSDF 对应输入口。颜色通道自动设 sRGB，数据通道（法线、粗糙度等）设 Non-Color。如果工程里已有 Normal Map、Separate Color、MixRGB 等中间节点，会优先复用。
+**自动连接贴图** — 识别贴图命名字段，接到 Principled BSDF 对应输入口。字段可以出现在文件名的任意位置，末尾的分辨率（`_2048`、`_4k`）、朝向标记（`_OpenGL` / `_DirectX`）不影响识别：`Rock_BaseColor_2048.png`、`BaseColor_Rock_2048.png`、`T_Rock_d.png` 都会认成底色。颜色通道自动设 sRGB，数据通道（法线、粗糙度等）设 Non-Color。如果工程里已有 Normal Map、Separate Color、MixRGB 等中间节点，会优先复用。
 
 支持的复合图逻辑：
 - `ORM` / `ARM`：R=AO，G=Roughness，B=Metallic
@@ -81,18 +81,18 @@
 
 ## 贴图后缀速查
 
-| 通道 | 可识别后缀 |
+| 通道 | 可识别字段 |
 | :--- | :--- |
-| Base Color | `_d`、`_bc`、`_basecolor`、`_albedo`、`_diff`、`_color` |
-| Normal | `_n`、`_nor`、`_normal`、`_nrm` |
-| Roughness | `_r`、`_roughness`、`_rough`、`_rgh` |
-| Metallic | `_m`、`_metallic`、`_metal`、`_met` |
-| AO | `_ao`、`_ambientocclusion`、`_occlusion` |
-| Alpha | `_alpha`、`_opacity`、`_a` |
-| ORM/ARM | `_orm`、`_orm_0`、`_orm_1`…（`_orm_` + 数字）、`_arm`、`_ao_r_m` |
-| RMA | `_rma` |
+| Base Color | `basecolor`、`albedo`、`diffuse`、`diff`、`color`、`col`、`bc`、`d` |
+| Normal | `normal`、`normalmap`、`nor`、`nrm`、`n` |
+| Roughness | `roughness`、`rough`、`rgh`、`r` |
+| Metallic | `metallic`、`metal`、`met`、`m` |
+| AO | `ao`、`ambientocclusion`（`ambient occlusion` 同样识别）、`occlusion` |
+| Alpha | `alpha`、`opacity`、`a` |
+| ORM/ARM | `orm`、`orm_0`、`orm_1`…（`orm` + 数字）、`arm`、`ao_r_m` |
+| RMA | `rma` |
 
-识别时不区分大小写。交付建议统一输出大写后缀（`_D`、`_N`、`_R`、`_ORM`、`_AO`）。
+识别时不区分大小写，也不要求字段在结尾：`_`、`-`、空格分隔或直接连写（`WeaponBaseColor`）都能拆开。`_d`、`_n`、`_r`、`_m`、`_a` 这类单字母只认最后一个字段位，所以 `RedRoot` 里的 `r` 不会当成 Roughness。交付建议统一输出大写后缀（`_D`、`_N`、`_R`、`_ORM`、`_AO`）。
 
 ## 常用流程
 
@@ -107,7 +107,7 @@
 ## FAQ
 
 **Q1：自动连接贴图有些图没反应？**
-只对能识别后缀或可追溯到有效通道的图生效。插件不会猜测未知用途的贴图，安全优先。
+只对能识别字段、或可追溯到有效通道的图生效。插件不会猜测未知用途的贴图，安全优先。名字里没有任何通道字段（例如只有 `RedRoot_2048.png`）的图会被跳过。
 
 **Q2：清除无用节点删了还能恢复吗？**
 可以 Ctrl+Z 撤销。它只删未连到输出链路的节点。
@@ -126,3 +126,9 @@
 
 **Q7：旧工程里的 `MI_` 材质名怎么办？**
 执行一次「根据物体重命名材质」或「根据贴图重命名材质」即可转成 `M_`，旧 `MI_` 前缀会自动剥掉，不会叠加成 `M_MI_xxx`。
+
+**Q8：AI 生成的贴图名字很长，还能识别吗？**
+能。字段按词匹配，不看位置和分隔符，末尾的分辨率、`OpenGL` / `DirectX` 这类朝向词都会被跳过，所以 `RedRoot_BaseColor_2048.png`、`BaseColor-RedRoot-2k.png`、`RedRoot_Normal_OpenGL_2048.png` 都可以直接连线。
+
+**Q9：法线是 DirectX 版本怎么办？**
+插件只识别、不擅自翻通道。状态栏提示「DirectX 法线，G 通道需翻转」时，给该贴图把 G 通道反相，或改用同一套的 OpenGL 版本，否则凹凸方向会反。

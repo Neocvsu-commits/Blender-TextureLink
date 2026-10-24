@@ -10,6 +10,7 @@ from .utils import (
     get_target_materials, process_reset_material, process_connect_and_arrange,
     process_clean_unused_nodes, process_rename_material, find_images_recursive,
     get_clean_name_for_search, check_suffix, SUFFIX_MAP, connect_pbr_nodes,
+    consume_connect_notes,
     process_rename_textures_from_material,
     process_rename_materials_from_object,
     get_compress_target_materials,
@@ -215,6 +216,9 @@ class NODE_OT_PBRConnectArrange(bpy.types.Operator):
                 count += 1
                 
         self.report({'INFO'}, f"成功连接并排版了 {count} 个材质")
+        notes = consume_connect_notes()
+        if notes:
+            self.report({'WARNING'}, "；".join(notes[:3]))
         return {'FINISHED'}
 
 class NODE_OT_PBRCleanNodes(bpy.types.Operator):
@@ -499,6 +503,9 @@ class NODE_OT_PBRBatchFolderConnect(bpy.types.Operator):
                 match_count += 1
 
         self.report({'INFO'}, f"处理完成，共匹配了 {match_count} 个材质")
+        notes = consume_connect_notes()
+        if notes:
+            self.report({'WARNING'}, "；".join(notes[:3]))
         return {'FINISHED'}
 
 class NODE_OT_PBRCompressTextures(bpy.types.Operator):
