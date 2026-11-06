@@ -443,21 +443,24 @@ class NODE_OT_PBRBatchFolderConnect(bpy.types.Operator):
                 mat_name = mat.name
                 clean_mat_name = mat_name.split('.')[0]  # 去掉 .001 后缀
 
-                # 模糊匹配：忽略 T_/M_/SM_（含旧 MI_）前缀差异，精确优先+子串回退
-                matched_files = []
-                match_scores = {}  # f_name -> score, 用于排序取最佳匹配
+                # 只在没有精确匹配时使用模糊候选，避免不同材质的贴图混用。
+                exact_files = []
+                fuzzy_matches = []
                 for f in all_files:
                     f_lower = f.lower()
                     if not f_lower.endswith(('.png', '.jpg', '.jpeg', '.tga', '.exr', '.tif', '.tiff')):
                         continue
                     f_stem = os.path.splitext(f)[0]
                     score = fuzzy_match_core_name(clean_mat_name, f_stem)
-                    if score > 0:
-                        matched_files.append(f)
-                        match_scores[f] = score
+                    if score == 100:
+                        exact_files.append(f)
+                    elif score > 0:
+                        fuzzy_matches.append((score, f))
 
-                # 按匹配质量降序排列，优先用最佳匹配
-                matched_files.sort(key=lambda x: match_scores.get(x, 0), reverse=True)
+                matched_files = exact_files
+                if not matched_files:
+                    fuzzy_matches.sort(key=lambda match: match[0], reverse=True)
+                    matched_files = [filename for _, filename in fuzzy_matches]
                 
                 if not matched_files:
                     continue
