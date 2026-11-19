@@ -1,7 +1,7 @@
 bl_info = {
     "name": "贴图链接",
     "author": "Neo",
-    "version": (2, 8, 1),
+    "version": (2, 11, 1),
     "blender": (3, 4, 0),
     "location": "Node Editor > Sidebar > PBR Tool",
     "description": "PBR贴图连接、重命名、清理、导出与压缩工具（正式版）",
@@ -17,24 +17,36 @@ if "bpy" in locals():
         importlib.reload(properties)
     if "utils" in locals():
         importlib.reload(utils)
+    if "naming" in locals():
+        importlib.reload(naming)
+    if "node_layout" in locals():
+        importlib.reload(node_layout)
     if "operators" in locals():
         importlib.reload(operators)
     if "ui" in locals():
         importlib.reload(ui)
+    if "node_preview" in locals():
+        node_preview.unregister()
+        importlib.reload(node_preview)
     if "update_checker" in locals():
         importlib.reload(update_checker)
 
 from . import properties
 from . import utils
+from . import naming
+from . import node_layout
 from . import operators
 from . import ui
+from . import node_preview
 from . import update_checker
 
 classes = (
     properties.PBRV2ToolProperties,
 
     operators.NODE_OT_PBRConnectArrange,
+    node_layout.NODE_OT_PBRArrangeTextureLinks,
     operators.NODE_OT_PBRCleanNodes,
+    naming.NODE_OT_PBRUnifyNames,
     operators.NODE_OT_PBRRenameMaterial,
     operators.NODE_OT_PBRRenameMaterialFromObject,
     operators.NODE_OT_PBRRenameTextures,
@@ -61,6 +73,7 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.pbr_v2_props = bpy.props.PointerProperty(type=properties.PBRV2ToolProperties)
+    node_preview.register()
 
     # 后台检查更新
     try:
@@ -75,9 +88,12 @@ def register():
         pass
 
 def unregister():
+    ui.stop_update_redraw()
+    node_preview.unregister()
+    if hasattr(bpy.types.Scene, "pbr_v2_props"):
+        del bpy.types.Scene.pbr_v2_props
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-    del bpy.types.Scene.pbr_v2_props
 
 if __name__ == "__main__":
     register()

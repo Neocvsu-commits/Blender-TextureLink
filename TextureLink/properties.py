@@ -8,6 +8,14 @@ class PBRV2ToolProperties(bpy.types.PropertyGroup):
         items=[('CURRENT', "当前", "仅对当前"), ('ALL', "全部", "对所有")],
         default='CURRENT'
     )
+    scope_arrange: EnumProperty(
+        name="贴图连线整理范围",
+        items=[
+            ('CURRENT', "当前", "整理着色器编辑器当前显示的节点树"),
+            ('SELECTED', "所选", "整理所选物体使用的材质"),
+        ],
+        default='CURRENT',
+    )
     scope_clean: EnumProperty(
         name="清理节点范围",
         items=[('CURRENT', "当前", "仅对当前"), ('ALL', "全部", "对所有")],
@@ -15,7 +23,7 @@ class PBRV2ToolProperties(bpy.types.PropertyGroup):
     )
     scope_rename: EnumProperty(
         name="重命名范围",
-        items=[('CURRENT', "当前", "仅对当前"), ('ALL', "全部", "对所有")],
+        items=[('CURRENT', "当前", "处理活动物体"), ('ALL', "全部", "处理所有选中的物体")],
         default='ALL'
     )
     scope_reset: EnumProperty(

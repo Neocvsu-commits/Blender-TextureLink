@@ -24,65 +24,45 @@ from .utils import (
 )
 
 
-def _bake_image_to_packed(img, fmt, target_ext, scene=None):
-    """把当前内存像素以 fmt 烘焙进 packed_file。
-
-  流程：save_render(内存→临时文件) → filepath 指向临时文件 → reload → pack → 清空 filepath。
-    glb 打包贴图不能用 img.save()（会写出旧 packed 字节）；pack 后不能指向不存在的磁盘路径（会变粉）。
-    """
-    if not img:
-        return False
+def _bake_image_to_packed(img, fmt, target_ext):
+    """Embed the encoded pixels and retain the source path used by external previews."""
     if not ensure_image_pixels_loaded(img):
-        print(f"[PBR Tools] 烘焙跳过（像素未载入） {getattr(img, 'name', '?')}")
         return False
 
-    tmp = None
+    source_path = img.filepath_raw
+    old_format = img.file_format
+    packed_path = img.packed_files[0].filepath if img.packed_files else source_path
+    if not packed_path or not source_path:
+        packed_path = "//textures/" + bpy.path.clean_name(os.path.splitext(img.name)[0]) + target_ext
+    elif fmt != old_format:
+        packed_path = os.path.splitext(packed_path)[0] + target_ext
+    old_colorspace = img.colorspace_settings.name
+    committed = False
     try:
-        fd, tmp = tempfile.mkstemp(suffix=target_ext)
-        os.close(fd)
-
-        img.file_format = fmt
-        img.save_render(tmp, scene=scene)
-        if not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
-            print(f"[PBR Tools] 烘焙临时文件无效 {getattr(img, 'name', '?')}")
+        with tempfile.TemporaryDirectory(prefix="texturelink-") as directory:
+            path = os.path.join(directory, "pixels" + target_ext)
+            img.file_format = fmt
+            img.save(filepath=path)
+            with open(path, "rb") as encoded:
+                data = encoded.read()
+        if not data:
             return False
-
-        old_fp = img.filepath
-        old_raw = getattr(img, "filepath_raw", None)
-        img.filepath = tmp
-        if old_raw is not None:
-            img.filepath_raw = tmp
-        img.reload()
-
-        if img.size[0] == 0 or img.size[1] == 0:
-            print(f"[PBR Tools] reload 后像素为空 {getattr(img, 'name', '?')}")
-            return False
-
-        img.pack()
-        img.file_format = fmt
-
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        tmp = None
-
-        # 打包后清空外部路径，避免指向不存在文件触发重载丢弃 packed 数据
-        try:
-            img.filepath = ""
-            if old_raw is not None:
-                img.filepath_raw = ""
-        except Exception:
-            pass
+        # Blender takes the packed entry's filename from filepath_raw.
+        # Passing bytes avoids both re-reading the source and reloading the old pack.
+        img.filepath_raw = packed_path
+        img.pack(data=data, data_len=len(data))
+        committed = True
         return True
-    except Exception as e:
-        print(f"[PBR Tools] 烘焙打包失败 {getattr(img, 'name', '?')}: {e}")
-        if tmp and os.path.isfile(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    except (OSError, RuntimeError, ValueError) as e:
+        print(f"[PBR Tools] 贴图打包失败 {img.name}: {e}")
         return False
+    finally:
+        img.filepath_raw = source_path or (packed_path if committed else "")
+        if not committed and img.file_format != old_format:
+            img.file_format = old_format
+        if img.colorspace_settings.name != old_colorspace:
+            img.colorspace_settings.name = old_colorspace
+        img.update_tag()
 
 
 def _export_textures_for_materials_to_dir(context, mats, directory, update_last_path=True):
@@ -541,6 +521,7 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
         converted_count = 0
         resized_count = 0
         disk_sync_failed = []
+        pack_failed = []
         skipped_no_pixels = []
         resize_blocked_by_min = []
         resize_failed_runtime = []
@@ -553,8 +534,8 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
         for img in images_to_process:
             if img.size[0] == 0 or img.size[1] == 0:
                 continue
-            # 跳过纯程序化贴图（没有文件来源也没有打包数据）
-            if img.source not in ('FILE', 'GENERATED') and not img.packed_file:
+            # Multi-buffer images cannot be replaced with a single encoded pack.
+            if img.source not in ('FILE', 'GENERATED') or img.use_multiview or len(img.packed_files) > 1:
                 continue
 
             if not ensure_image_pixels_loaded(img):
@@ -614,7 +595,7 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
                 target_ext = ext_map.get(fmt, '.png')
                 current_name = img.name
                 if os.path.splitext(current_name)[1].lower() != target_ext:
-                    if _bake_image_to_packed(img, fmt, target_ext, context.scene):
+                    if _bake_image_to_packed(img, fmt, target_ext):
                         new_name = os.path.splitext(current_name)[0] + target_ext
                         try:
                             img.name = new_name
@@ -624,6 +605,9 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
                         is_modified = True
                         baked = True
                         converted_count += 1
+                    else:
+                        pack_failed.append(img.name)
+                        continue
             
             needs_disk_sync = bool(img.get("_pbr_unsynced_resize", False))
             # 防止历史标记导致“空转写盘”：若当前尺寸与磁盘一致，则清理标记并跳过补同步
@@ -663,17 +647,13 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
                     else:
                         disk_sync_failed.append(img.name)
                 else:
-                    # 不写盘：把当前内存缓冲烘焙成 packed 数据，保证视口与导出都拿到修改后的像素。
-                    # 直接 img.pack() 对 source='FILE' 且磁盘原图仍在的贴图会重读原图、丢失缩放，
-                    # 故统一走 _bake_image_to_packed（缩放-only 时按当前 file_format 烘焙）。
+                    # Embed the resized pixels even when their file format stays the same.
                     if is_modified and not baked:
                         cur_fmt = img.file_format or 'PNG'
                         cur_ext = ext_map.get(cur_fmt, os.path.splitext(img.name)[1].lower() or '.png')
-                        if not _bake_image_to_packed(img, cur_fmt, cur_ext, context.scene):
-                            try:
-                                img.pack()
-                            except Exception as e:
-                                print(f"[PBR Tools] 内存更新后打包失败 {img.name}: {e}")
+                        if not _bake_image_to_packed(img, cur_fmt, cur_ext):
+                            pack_failed.append(img.name)
+                            continue
                     if is_modified:
                         img["_pbr_unsynced_resize"] = True
 
@@ -691,6 +671,9 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
             msg += f"；{len(resize_blocked_by_min)} 张因最小分辨率限制未缩小（可下调「最小分辨率」或换更大贴图）"
         if resize_failed_runtime:
             msg += f"；{len(resize_failed_runtime)} 张缩放调用后尺寸未变化（建议检查文件读写权限/贴图状态）"
+        if pack_failed:
+            self.report({'WARNING'}, f"{msg}；打包失败：{', '.join(pack_failed[:3])}")
+            return {'FINISHED'}
         if processed_count == 0 and images_to_process:
             self.report({'WARNING'}, f"{msg}（若尺寸未变：检查压缩比例/最小分辨率是否阻止缩小，或贴图路径是否缺失）")
             return {'FINISHED'}
@@ -848,6 +831,7 @@ class NODE_OT_PBRCheckUpdate(bpy.types.Operator):
         try:
             from .update_checker import force_check_for_updates
             from . import bl_info as addon_bl_info
+            from .ui import watch_update_check
 
             force_check_for_updates(
                 "Neocvsu-commits",
@@ -855,7 +839,8 @@ class NODE_OT_PBRCheckUpdate(bpy.types.Operator):
                 addon_bl_info["version"],
                 os.path.dirname(__file__),
             )
-            self.report({"INFO"}, "已发起更新检查，请稍后查看面板顶部")
+            watch_update_check()
+            self.report({"INFO"}, "已开始检查更新")
         except ImportError:
             self.report({"ERROR"}, "更新模块不可用")
         except Exception as e:

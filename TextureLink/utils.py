@@ -1197,6 +1197,12 @@ def process_rename_material(mat):
     return False
 
 
+def _indexed_slot_suffix(index: int) -> str:
+    letter = chr(65 + (index % 26))
+    cycle = index // 26
+    return f"{letter}{cycle}" if cycle else letter
+
+
 def process_rename_materials_from_object(obj):
     """
     根据物体名重命名其材质槽中的材质，材质名统一 M_ 前缀：
@@ -1240,19 +1246,6 @@ def process_rename_materials_from_object(obj):
             if _force_claim_name(bpy.data.materials, mat, target_name):
                 renamed = 1
         return renamed
-
-    def _indexed_slot_suffix(index: int) -> str:
-        """
-        后缀规则：
-        - 第 1 轮：A ~ Z
-        - 第 2 轮：A1 ~ Z1
-        - 第 3 轮：A2 ~ Z2
-        """
-        letter = chr(65 + (index % 26))  # 65='A'
-        round_idx = index // 26
-        if round_idx == 0:
-            return letter
-        return f"{letter}{round_idx}"
 
     # 多材质：按槽位顺序追加后缀，支持超出 Z 的连续编号
     for idx, slot in enumerate(non_empty_slots):
@@ -1300,135 +1293,139 @@ def _image_extension(image):
     return ".png"
 
 
-def _make_link_key(link):
-    try:
-        return (
-            link.from_node.name,
-            link.from_socket.identifier,
-            link.to_node.name,
-            link.to_socket.identifier,
-        )
-    except Exception:
-        return (id(link),)
+_CHANNEL_SUFFIX = {
+    'BASE_COLOR': '_D', 'NORMAL': '_N', 'ROUGHNESS': '_R', 'METALLIC': '_M',
+    'AO': '_AO', 'ORM': '_ORM', 'RMA': '_RMA', 'ALPHA': '_Alpha',
+}
+_PRINCIPLED_SUFFIX = {
+    'Base Color': '_D', 'Normal': '_N', 'Roughness': '_R', 'Metallic': '_M', 'Alpha': '_Alpha',
+}
+_STANDARD_SUFFIX = re.compile(r'_(ORM|RMA|AO|Alpha|D|N|R|M|Tex)(?:_\d+)?$', re.I)
+_SUFFIX_CASE = {s.lower(): s for s in (*_CHANNEL_SUFFIX.values(), '_Tex')}
+# Strip whole metadata fields, not digits inside an asset code such as GY_MB01 or Prop_01.
+_SOURCE_TRAILERS = re.compile(
+    r'[_ .-]+(?:128|256|512|1024|2048|4096|8192|16384|\d+k|opengl|directx|srgb|'
+    r'non[_ -]?color|linear|raw|map|texture|v\d+)$', re.I,
+)
 
 
-def _is_socket_reaching_principled_input(output_socket, input_name, visited_links):
-    """
-    递归判断某个输出 socket 是否最终连到 Principled 的指定输入。
-    """
-    for link in output_socket.links:
-        link_key = _make_link_key(link)
-        if link_key in visited_links:
+def _texture_source_name(name):
+    stem = _strip_common_prefixes(clean_name_for_rename(name))
+    standard = _STANDARD_SUFFIX.search(stem)
+    if standard:
+        core = stem[:standard.start()]
+        suffix = _SUFFIX_CASE['_' + standard.group(1).lower()]
+    else:
+        match = find_channel_match(stem)
+        if match:
+            core = stem[:match.start].strip(' _-.') or stem[match.end:]
+            suffix = _CHANNEL_SUFFIX[match.channel]
+        else:
+            core, suffix = stem, '_Tex'
+    core = core.strip(' _-.')
+    while core:
+        cleaned = _SOURCE_TRAILERS.sub('', core)
+        if cleaned == core:
+            break
+        core = cleaned
+    return core, suffix
+
+
+def _group_nodes(tree, path=()):
+    """Yield nodes together with the group instances needed to follow interface sockets."""
+    for node in tree.nodes:
+        yield node, path
+        if node.type == 'GROUP' and node.node_tree and node not in path:
+            yield from _group_nodes(node.node_tree, (*path, node))
+
+
+def _interface_socket(sockets, identifier):
+    return next((socket for socket in sockets if socket.identifier == identifier), None)
+
+
+def _material_image_usage(mat):
+    if not mat or not mat.node_tree:
+        return {}
+    images = {}
+    pending = []
+    for node, path in _group_nodes(mat.node_tree):
+        if node.type == 'TEX_IMAGE' and node.image:
+            images.setdefault(node.image, set())
+        elif node.type == 'BSDF_PRINCIPLED':
+            for name, suffix in _PRINCIPLED_SUFFIX.items():
+                socket = node.inputs.get(name)
+                if socket and socket.is_linked:
+                    pending.append((socket, path, suffix, None))
+        elif node.type == 'GROUP':
+            ao = node.inputs.get('Occlusion')
+            if ao and ao.is_linked:
+                pending.append((ao, path, '_AO', None))
+
+    visited = set()
+    while pending:
+        entry = pending.pop()
+        if entry in visited:
             continue
-        visited_links.add(link_key)
+        visited.add(entry)
+        socket, path, suffix, component = entry
+        for link in socket.links:
+            if not link.is_valid:
+                continue
+            source, output = link.from_node, link.from_socket
+            if source.type == 'TEX_IMAGE':
+                if source.image:
+                    images[source.image].add((suffix, component))
+                continue
+            if source.type == 'GROUP_INPUT' and path:
+                outer = _interface_socket(path[-1].inputs, output.identifier)
+                if outer is not None:
+                    pending.append((outer, path[:-1], suffix, component))
+                continue
+            if source.type == 'GROUP':
+                if source.node_tree and source not in path:
+                    for group_out in source.node_tree.nodes:
+                        if group_out.type == 'GROUP_OUTPUT' and group_out.is_active_output:
+                            inner = _interface_socket(group_out.inputs, output.identifier)
+                            if inner is not None:
+                                pending.append((inner, (*path, source), suffix, component))
+                continue
+            channel_index = component
+            if source.type in {'SEPARATE_COLOR', 'SEPRGB'} and getattr(source, 'mode', 'RGB') == 'RGB':
+                channel_index = list(source.outputs).index(output)
+            multiply_color = suffix == '_D' and is_multiply_mix_node(source)
+            for upstream in source.inputs:
+                if not upstream.is_linked:
+                    continue
+                usage = suffix
+                if multiply_color:
+                    if upstream.name in {'B', 'Color2'}:
+                        usage = '_AO'
+                    elif upstream.name not in {'A', 'Color1'}:
+                        continue
+                if source.type == 'NORMAL_MAP' and upstream.name != 'Color':
+                    continue
+                if source.type == 'BUMP' and upstream.name != 'Normal':
+                    continue
+                pending.append((upstream, path, usage, channel_index))
+    return images
 
-        to_node = link.to_node
-        to_socket = link.to_socket
 
-        if to_node.type == 'BSDF_PRINCIPLED' and to_socket.name == input_name:
-            return True
-
-        if to_node.type == 'NORMAL_MAP' and to_socket.name == 'Color':
-            normal_out = to_node.outputs.get('Normal')
-            if normal_out and _is_socket_reaching_principled_input(normal_out, 'Normal', visited_links):
-                return True
-
-        for out_socket in to_node.outputs:
-            if out_socket.is_linked and _is_socket_reaching_principled_input(out_socket, input_name, visited_links):
-                return True
-    return False
+def _usage_suffix(uses):
+    if ('_R', 1) in uses and ('_M', 2) in uses:
+        return '_ORM'
+    if ('_R', 0) in uses and ('_M', 1) in uses:
+        return '_RMA'
+    found = {suffix for suffix, _ in uses}
+    return next((s for s in ('_AO', '_N', '_D', '_Alpha', '_R', '_M') if s in found), '')
 
 
-def _is_socket_reaching_gltf_occlusion(output_socket, visited_links):
-    """
-    递归判断输出是否最终连到 glTF Material Output（或同类）的 Occlusion 槽，
-    与 GLB 导入常见的 ORM：Separate Color 的 Red → Occlusion 一致。
-    """
-    for link in output_socket.links:
-        link_key = _make_link_key(link)
-        if link_key in visited_links:
-            continue
-        visited_links.add(link_key)
-
-        to_node = link.to_node
-        to_socket = link.to_socket
-
-        if to_socket and to_socket.name == 'Occlusion':
-            return True
-
-        for out_sock in to_node.outputs:
-            if out_sock.is_linked and _is_socket_reaching_gltf_occlusion(out_sock, visited_links):
-                return True
-    return False
-
-
-def _trace_usage_suffixes_from_socket(output_socket, visited_links):
-    """
-    从图像节点某个输出出发，追踪最终用途并返回命名后缀集合。
-    """
-    found = set()
-    for link in output_socket.links:
-        link_key = _make_link_key(link)
-        if link_key in visited_links:
-            continue
-        visited_links.add(link_key)
-
-        to_node = link.to_node
-        to_socket = link.to_socket
-
-        # 直接连 Principled 通道
-        if to_node.type == 'BSDF_PRINCIPLED':
-            if to_socket.name == 'Base Color':
-                found.add('_D')
-            elif to_socket.name == 'Roughness':
-                found.add('_R')
-            elif to_socket.name == 'Metallic':
-                found.add('_M')
-            elif to_socket.name == 'Alpha':
-                found.add('_Alpha')
-            continue
-
-        if to_socket and to_socket.name == 'Occlusion':
-            found.add('_AO')
-            continue
-
-        # 通过 Normal Map 连 Principled.Normal
-        if to_node.type == 'NORMAL_MAP' and to_socket.name == 'Color':
-            normal_out = to_node.outputs.get('Normal')
-            if normal_out:
-                if _is_socket_reaching_principled_input(normal_out, 'Normal', set(visited_links)):
-                    found.add('_N')
-            continue
-
-        # Separate Color：绿→Roughness 且 蓝→Metallic 时视为完整 ORM，命名始终 _ORM（红仍可接 Occlusion）。
-        # 仅当「只有红通道」接到外置 Occlusion（如 glTF Material Output）且未形成上述 ORM 时，才按 _AO 命名。
-        if to_node.type == 'SEPARATE_COLOR' and to_socket.name == 'Color':
-            has_rough = False
-            has_metal = False
-            for out_socket in to_node.outputs:
-                if _is_socket_reaching_principled_input(out_socket, 'Roughness', set(visited_links)):
-                    has_rough = True
-                if _is_socket_reaching_principled_input(out_socket, 'Metallic', set(visited_links)):
-                    has_metal = True
-            red_out = to_node.outputs.get('Red')
-            is_full_orm = has_rough and has_metal
-            if is_full_orm:
-                found.add('_ORM')
-            elif red_out and _is_socket_reaching_gltf_occlusion(red_out, set(visited_links)):
-                found.add('_AO')
-            if not is_full_orm:
-                if has_rough:
-                    found.add('_R')
-                if has_metal:
-                    found.add('_M')
-            continue
-
-        # 其他中间节点：继续向后递归追踪
-        for next_output in to_node.outputs:
-            if next_output.is_linked:
-                found.update(_trace_usage_suffixes_from_socket(next_output, visited_links))
-
-    return found
+def material_image_names(mat):
+    """Map each referenced Image to its source stem and canonical channel suffix in node order."""
+    names = {}
+    for image, uses in _material_image_usage(mat).items():
+        core, filename_suffix = _texture_source_name(image.name)
+        names[image] = (core, _usage_suffix(uses) or filename_suffix)
+    return names
 
 
 def _image_needs_pixel_flush_to_disk(image, abs_path: str) -> bool:
@@ -1465,43 +1462,20 @@ def process_rename_textures_from_material(mat, props=None, scene=None):
     if not image_nodes:
         return 0, 0, 0
 
-    # 优先级：ORM > AO（仅红→外置 Occlusion 且无完整 ORM 时）> Normal > BaseColor > Roughness > Metallic
-    suffix_priority = ['_ORM', '_AO', '_N', '_D', '_Alpha', '_R', '_M']
-    image_to_suffixes = {}
-
-    for img_node in image_nodes:
-        img = img_node.image
-        usage_suffixes = set()
-
-        color_out = img_node.outputs.get('Color')
-        if color_out and color_out.is_linked:
-            usage_suffixes.update(_trace_usage_suffixes_from_socket(color_out, set()))
-
-        alpha_out = img_node.outputs.get('Alpha')
-        if alpha_out and alpha_out.is_linked:
-            usage_suffixes.update(_trace_usage_suffixes_from_socket(alpha_out, set()))
-
-        if not usage_suffixes:
-            continue
-
-        if img not in image_to_suffixes:
-            image_to_suffixes[img] = set()
-        image_to_suffixes[img].update(usage_suffixes)
-
+    uses = _material_image_usage(mat)
     renamed_count = 0
     disk_renamed_count = 0
     disk_pixels_flushed = 0
-    for img, suffixes in image_to_suffixes.items():
-        chosen_suffix = None
-        for s in suffix_priority:
-            if s in suffixes:
-                chosen_suffix = s
-                break
+    for img in dict.fromkeys(node.image for node in image_nodes):
+        chosen_suffix = _usage_suffix(uses[img])
         if not chosen_suffix:
             continue
 
         ext = _image_extension(img)
         new_base_filename = f"{base_name}{chosen_suffix}"
+        current_stem = clean_name_for_rename(img.name)
+        if re.fullmatch(re.escape(new_base_filename) + r"_\d+", current_stem):
+            new_base_filename = current_stem
         new_name = f"{new_base_filename}{ext}"
         if img.name != new_name:
             if _force_claim_name(bpy.data.images, img, new_name):

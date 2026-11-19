@@ -62,9 +62,7 @@ def _check_thread(owner, repo, current_version, plugin_dir):
     repo_key = f"{owner}/{repo}"
     url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
 
-    result = {"status": "checking", "plugin_dir": plugin_dir}
-    with _cache_lock:
-        _cache[repo_key] = result
+    result = {"plugin_dir": plugin_dir}
 
     try:
         req = urllib.request.Request(
@@ -105,6 +103,10 @@ def _check_thread(owner, repo, current_version, plugin_dir):
     except Exception as e:
         result["status"] = "error"
         result["error"] = str(e)
+    finally:
+        # Publish the status and version/URL together for the sidebar draw callback.
+        with _cache_lock:
+            _cache[repo_key] = result
 
 
 # ---- 公开 API ----
@@ -125,6 +127,11 @@ def force_check_for_updates(owner, repo, current_version, plugin_dir):
 
 
 def _start_check_thread(owner, repo, current_version, plugin_dir):
+    repo_key = f"{owner}/{repo}"
+    with _cache_lock:
+        if _cache.get(repo_key, {}).get("status") == "checking":
+            return
+        _cache[repo_key] = {"status": "checking", "plugin_dir": plugin_dir}
     t = threading.Thread(
         target=_check_thread,
         args=(owner, repo, current_version, plugin_dir),
