@@ -31,28 +31,24 @@ def _draw_update_controls(layout, *, show_error_detail=False):
 
     status = get_check_status(*_UPDATE_REPO)
     state = status["status"]
+    text, icon = {
+        "checking": ("检查中…", "SORTTIME"),
+        "no_update": ("已是最新版", "CHECKMARK"),
+        "error": ("检查失败，重试", "ERROR"),
+        "no_release": ("暂无发布版本", "INFO"),
+    }.get(state, ("检查更新", "FILE_REFRESH"))
     row = layout.row(align=True)
-    row.alignment = 'LEFT'
-    row.label(text="v" + ".".join(map(str, bl_info["version"])), icon='INFO')
-    row.operator("node.pbr_check_update", text="检查更新", icon='FILE_REFRESH')
+    row.label(text="v" + ".".join(map(str, bl_info["version"])))
+    row.operator("node.pbr_check_update", text=text, icon=icon)
     if state == "checking":
-        row.label(text="检查中…", icon='SORTTIME')
         watch_update_check()
-    elif state == "no_update":
-        row.label(text="已是最新版", icon='CHECKMARK')
-    elif state == "no_release":
-        row.label(text="暂无发布版本", icon='INFO')
-    elif state == "error":
-        layout.label(text="更新检查失败，请重试", icon='ERROR')
-        if show_error_detail and status["error"]:
-            layout.label(text=status["error"])
+    elif state == "error" and show_error_detail and status["error"]:
+        layout.label(text=status["error"])
     elif state == "has_update":
         info = get_update_info(*_UPDATE_REPO)
         if info:
             update_row = layout.row(align=True)
-            update_row.alert = True
-            update_row.label(text=f"可更新至 v{info['latest_version']}", icon='IMPORT')
-            update_row.operator("node.pbr_install_update", text="一键更新", icon='IMPORT')
+            update_row.operator("node.pbr_install_update", text=f"更新至 v{info['latest_version']}", icon='IMPORT')
             update_row.operator("wm.url_open", text="更新说明", icon='URL').url = info["html_url"]
 
 

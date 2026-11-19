@@ -55,7 +55,9 @@ class PBRV2ToolProperties(bpy.types.PropertyGroup):
         name="压缩比例",
         default=0.5,
         min=0.01,
-        max=1.0
+        max=1.0,
+        precision=2,
+        step=1,
     )
     min_resolution: IntProperty(
         name="最小分辨率",

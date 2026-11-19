@@ -530,6 +530,8 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
             'JPEG': '.jpg', 'PNG': '.png', 'TARGA': '.tga',
             'TIFF': '.tif', 'BMP': '.bmp', 'OPEN_EXR': '.exr'
         }
+        # Older scenes and slider drags can store more digits than the UI shows.
+        ratio_percent = round(props.compression_ratio * 100)
 
         for img in images_to_process:
             if img.size[0] == 0 or img.size[1] == 0:
@@ -556,15 +558,13 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
             # Step 1: 尺寸压缩（在内存中操作）
             if props.do_resize:
                 w, h = img.size
-                user_ratio = props.compression_ratio
-                # 等比缩放：输出宽高均不低于 min_resolution（与旧逻辑等价，写法更清晰）
-                min_r = props.min_resolution
-                floor_ratio = max(min_r / w, min_r / h) if w > 0 and h > 0 else 1.0
-                effective_ratio = max(user_ratio, floor_ratio)
-                effective_ratio = min(effective_ratio, 1.0)
-
-                new_w = max(1, int(w * effective_ratio))
-                new_h = max(1, int(h * effective_ratio))
+                new_w = w * ratio_percent // 100
+                new_h = h * ratio_percent // 100
+                if min(new_w, new_h) < props.min_resolution:
+                    short_side = min(w, h)
+                    target_short = min(short_side, props.min_resolution)
+                    new_w = w * target_short // short_side
+                    new_h = h * target_short // short_side
 
                 if new_w < w or new_h < h:
                     try:
@@ -578,15 +578,17 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
                                 pass
                             img.scale(new_w, new_h)
                             img.update()
-                        if img.size[0] < w or img.size[1] < h:
+                        if tuple(img.size) == (new_w, new_h):
                             resized_count += 1
                             is_modified = True
                         else:
                             resize_failed_runtime.append(img.name)
+                            continue
                     except Exception as e:
                         print(f"[PBR Tools] 尺寸压缩失败 {img.name}: {e}")
                         resize_failed_runtime.append(img.name)
-                elif user_ratio < 1.0 - 1e-6:
+                        continue
+                elif ratio_percent < 100:
                     resize_blocked_by_min.append(img.name)
 
             # Step 2: 格式转换 — 通过临时文件烘焙出目标格式的 packed 数据
@@ -670,7 +672,7 @@ class NODE_OT_PBRCompressTextures(bpy.types.Operator):
         if resize_blocked_by_min:
             msg += f"；{len(resize_blocked_by_min)} 张因最小分辨率限制未缩小（可下调「最小分辨率」或换更大贴图）"
         if resize_failed_runtime:
-            msg += f"；{len(resize_failed_runtime)} 张缩放调用后尺寸未变化（建议检查文件读写权限/贴图状态）"
+            msg += f"；{len(resize_failed_runtime)} 张贴图未能缩放到目标尺寸，已跳过"
         if pack_failed:
             self.report({'WARNING'}, f"{msg}；打包失败：{', '.join(pack_failed[:3])}")
             return {'FINISHED'}
